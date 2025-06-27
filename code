@@ -1,0 +1,137 @@
+from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup
+import pandas as pd
+import re
+import os
+
+def scrape_top_action_games_with_details():
+    results = []
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False, slow_mo=300)
+        page = browser.new_page()
+        page.goto("https://www.miniplay.com/action-games", timeout=120000)
+
+        # Accept cookies
+        try:
+            page.locator("button:has-text('Accept All Cookies')").click(timeout=5000)
+            page.wait_for_timeout(2000)
+        except:
+            print("ℹ️ No cookie banner.")
+
+        # Locate the "Which are the most popular Action Games?" header and find games below it
+        header = page.locator("text=Which are the most popular Action Games?")
+        if header.count() == 0:
+            print("❌ FAQ header not found.")
+            browser.close()
+            return
+
+        parent = header.locator("xpath=..")
+        links = parent.locator("a")
+        count = links.count()
+
+        for i in range(min(count, 10)):  # Scrape the top 10 games
+            a = links.nth(i)
+            name = a.inner_text().strip()
+            href = a.get_attribute("href")
+            full_url = href if href.startswith("http") else f"https://www.miniplay.com{href}"
+            print(f"\n🔍 Scraping: {name}")
+
+            game_page = browser.new_page()
+            try:
+                game_page.goto(full_url, timeout=120000)
+                game_page.wait_for_timeout(5000)
+
+                # Scroll down in steps to make sure we reach the developer section
+                for i in range(3):
+                    game_page.evaluate("window.scrollBy(0, 1000);")
+                    game_page.wait_for_timeout(2000)
+
+                # Wait for the page to load completely
+                game_page.wait_for_timeout(3000)
+
+                # Capture raw HTML content for debugging
+                html = game_page.content()
+                soup = BeautifulSoup(html, "html.parser")
+                
+                # Debug: Print raw HTML content to inspect the structure
+                print(f"\n🔍 Raw HTML content for {name}:\n", html[:1000])  # Print first 1000 chars
+
+                # 🧑‍💻 Developer (Check for "Who created [game name]" in <b> tags)
+                developer = "N/A"
+                
+                # Search for the pattern "Who created [game name]" in <b> tag
+                who_created_tag = soup.find("b", string=re.compile(f"Who created {re.escape(name)}\\?", re.IGNORECASE))
+                if who_created_tag:
+                    # Assuming the developer name is right after this <b> tag
+                    developer_info = who_created_tag.find_next("p")
+                    if developer_info:
+                        developer_text = developer_info.text.strip()
+                        # Extract the developer name from the detailed description
+                        developer = developer_text.split('.')[0]  # Take only the first sentence
+                        developer = developer.split('by')[-1].strip()  # Get name after "by"
+
+                # If developer still isn't found, look for more generic text like "Developed by"
+                if developer == "N/A":
+                    dev_tag = soup.find(string=re.compile(r"(developed|created) by", re.IGNORECASE))
+                    if dev_tag:
+                        developer = dev_tag.find_parent().text.strip()
+
+                # 📊 Play count
+                play_count = "N/A"
+                play_tag = soup.find("p", class_="game-info-stats mb-0")
+                if play_tag:
+                    play_count = play_tag.text.strip()
+
+                # 🌟 Star count (Capture value attribute)
+                star_count = "N/A"
+                star_tag = soup.find("div", class_="meter-svg")
+                if star_tag:
+                    star_count = star_tag.get("value", "N/A")
+
+                # 📅 Vote Count and Rating
+                vote_info = "N/A"
+                vote_tag = soup.find("span", class_="js-total-votes")
+                if vote_tag:
+                    total_votes = vote_tag.get("data-total-votes-value", "N/A")
+                    vote_value = vote_tag.find_previous("span", itemprop="ratingValue")
+                    if vote_value and total_votes:
+                        vote_info = f"{vote_value.text.strip()} - {total_votes}"
+
+                # 📚 Genre (Look for the genre section on the page)
+                genres = []
+                genre_tags = soup.find_all("a", string=re.compile(r"Action|Multiplayer|2 Players Games|Adventure", re.IGNORECASE))
+                for genre_tag in genre_tags:
+                    genres.append(genre_tag.text.strip())
+
+                # Join all genres into one string if there are multiple genres
+                genre = ", ".join(genres) if genres else "N/A"
+
+                results.append({
+                    "Game Name": name,
+                    "Game URL": full_url,
+                    "Developer": developer,
+                    "Play Count": play_count,
+                    "Vote Info": vote_info,
+                    "Star Count": star_count,
+                    "Genre": genre  # Include all genres here
+                })
+
+            except Exception as e:
+                print(f"⚠️ Error processing {name}: {e}")
+            finally:
+                game_page.close()
+
+        browser.close()
+
+    # Save to custom path
+    output_path = r"C:\Miniplay\miniplay_top_action_games_with_details.csv"
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    df = pd.DataFrame(results)
+    df.to_csv(output_path, index=False)
+    print(f"\n✅ Saved to {output_path}")
+    print(df)
+
+if __name__ == "__main__":
+    scrape_top_action_games_with_details()
